@@ -118,5 +118,5 @@ func main() {
 	f.Any("/metrics", promhttp.Handler())
 	f.Any("/healthz", func() {})
 
-	f.Run(80)
+	f.Run(8080)
 }
