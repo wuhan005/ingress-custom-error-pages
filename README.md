@@ -85,12 +85,12 @@ spec:
                 path: "503.html"
 ```
 
-3. Run `kubectl apply -n kube-system -f custom-error.yaml`.
+2. Run `kubectl apply -n kube-system -f custom-error.yaml`.
 
-4. Edit the `ingress-nginx-controller` Deployment and set the value of the `--default-backend-service` flag to the name
+3. Edit the `ingress-nginx-controller` Deployment and set the value of the `--default-backend-service` flag to the name
    of the newly created error backend.
 
-5. Edit the `ingress-nginx-controller` ConfigMap and create the key `custom-http-errors` with a value of `404,503`.
+4. Edit the `ingress-nginx-controller` ConfigMap and create the key `custom-http-errors` with a value of `404,503`.
 
 ## Why not [ingress-nginx official custom error pages](https://github.com/kubernetes/ingress-nginx/tree/main/images/custom-error-pages)?
 
