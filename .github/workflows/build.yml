@@ -1,0 +1,40 @@
+name: Publish
+on:
+  push:
+    branches: [ master ]
+
+env:
+  GOPROXY: "https://proxy.golang.org"
+
+jobs:
+  build:
+    name: Build Docker image
+    strategy:
+      matrix:
+        go-version: [ 1.19.x ]
+        platform: [ ubuntu-latest ]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v1
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Get dependencies
+        run: go mod tidy
+
+      - name: Build binary
+        run: CGO_ENABLED=0 go build -a -installsuffix cgo -ldflags "-s -w" -o .
+
+      - name: Build & Publish to Aliyun Hangzhou Registry
+        uses: wuhan005/publish-docker-action@master
+        with:
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+          registry: registry.cn-hangzhou.aliyuncs.com
+          repository: registry.cn-hangzhou.aliyuncs.com/eggplant/ingress-custom-error-pages
+          tag_format: "%YYYY%_%MM%_%DD%_%H%%m%%s%"
+          auto_tag: true
