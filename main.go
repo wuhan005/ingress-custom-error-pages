@@ -82,28 +82,26 @@ func main() {
 		}
 
 		path := "/www"
-		file := filepath.Join(path, namespace, serviceName, fmt.Sprintf("%v%v", code, ext))
-		f, err := os.Open(file)
-		if err != nil {
-			log.Printf("unexpected error opening file: %v", err)
+		statusCode := strconv.Itoa(code)
 
-			statusCode := strconv.Itoa(code)
-			file := filepath.Join(path, namespace, serviceName, fmt.Sprintf("%cxx%v", statusCode[0], ext))
-			f, err := os.Open(file)
-			if err != nil {
-				log.Printf("unexpected error opening file: %v", err)
-				http.NotFound(ctx.ResponseWriter(), ctx.Request().Request)
-				return
-			}
-
-			defer f.Close()
-			log.Printf("serving custom error response for code %v and format %v from file %v", code, format, file)
-			_, _ = io.Copy(ctx.ResponseWriter(), f)
-			return
+		files := []string{
+			filepath.Join(path, namespace, serviceName, fmt.Sprintf("%v%v", code, ext)),
+			filepath.Join(path, namespace, serviceName, fmt.Sprintf("%cxx%v", statusCode[0], ext)),
+			filepath.Join(path, namespace, fmt.Sprintf("%v%v", code, ext)),
+			filepath.Join(path, namespace, fmt.Sprintf("%cxx%v", statusCode[0], ext)),
+			filepath.Join(path, fmt.Sprintf("%v%v", code, ext)),
+			filepath.Join(path, fmt.Sprintf("%cxx%v", statusCode[0], ext)),
 		}
 
+		f, err := tryToOpenFile(files)
+		if err != nil {
+			log.Printf("unexpected error opening file: %v", err)
+			http.NotFound(ctx.ResponseWriter(), ctx.Request().Request)
+			return
+		}
 		defer f.Close()
-		log.Printf("serving custom error response for code %v and format %v from file %v", code, format, file)
+
+		log.Printf("serving custom error response for code %v and format %v", code, format)
 		_, _ = io.Copy(ctx.ResponseWriter(), f)
 
 		duration := time.Since(start).Seconds()
@@ -119,4 +117,17 @@ func main() {
 	f.Any("/healthz", func() {})
 
 	f.Run(8080)
+}
+
+func tryToOpenFile(paths []string) (*os.File, error) {
+	for _, path := range paths {
+		f, err := os.Open(path)
+		if err != nil {
+			log.Printf("unexpected error opening file: %v", err)
+			continue
+		}
+		return f, nil
+	}
+
+	return nil, os.ErrNotExist
 }
