@@ -106,7 +106,7 @@ func main() {
 		log.Printf("serving custom error response for code %v and format %v from file %v", code, format, file)
 		_, _ = io.Copy(ctx.ResponseWriter(), f)
 
-		duration := time.Now().Sub(start).Seconds()
+		duration := time.Since(start).Seconds()
 
 		proto := strconv.Itoa(ctx.Request().ProtoMajor)
 		proto = fmt.Sprintf("%s.%s", proto, strconv.Itoa(ctx.Request().ProtoMinor))
