@@ -119,6 +119,73 @@ func TestErrorPagePriority(t *testing.T) {
 	}
 }
 
+func TestTraefikErrorResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body string
+		status           int
+		forwardedHeaders bool
+	}{
+		{name: "exact page", path: "/503.html", status: 503, body: "global page"},
+		{name: "status class fallback", path: "/502.html", status: 502, body: "server error"},
+		{name: "not found page", path: "/404.html", status: 404, body: "not found page"},
+		{name: "namespace page", path: "/503.html?namespace=team", status: 503, body: "namespace page"},
+		{name: "service page", path: "/503.html?namespace=team&service=app", status: 503, body: "service page"},
+		{name: "scope fallback", path: "/503.html?namespace=missing&service=missing", status: 503, body: "global page"},
+		{name: "ignore forwarded headers", path: "/503.html", status: 503, body: "global page", forwardedHeaders: true},
+		{name: "explicit scope wins", path: "/503.html?namespace=team&service=app", status: 503, body: "service page", forwardedHeaders: true},
+		{name: "zero code", path: "/0.html", status: 404, body: "not found page"},
+		{name: "out-of-range code", path: "/600.html", status: 404, body: "not found page"},
+		{name: "four-digit code", path: "/1000.html", status: 404, body: "not found page"},
+		{name: "malformed code", path: "/bad.html", status: 404, body: "not found page"},
+		{name: "namespace traversal", path: "/503.html?namespace=..%2Fprivate", status: 400, body: "invalid namespace or service name\n"},
+		{name: "service traversal", path: "/503.html?namespace=team&service=..%5Cprivate", status: 400, body: "invalid namespace or service name\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := testRoot(t, map[string]string{
+				"404.html":          "not found page",
+				"503.html":          "global page",
+				"5xx.html":          "server error",
+				"team/503.html":     "namespace page",
+				"team/app/503.html": "service page",
+			})
+			server := httptest.NewServer(newServer(root))
+			defer server.Close()
+
+			req, err := http.NewRequest(http.MethodGet, server.URL+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.forwardedHeaders {
+				req.Header.Set(CodeHeader, "404")
+				req.Header.Set(FormatHeader, "application/json")
+				req.Header.Set(Namespace, "../private")
+				req.Header.Set(ServiceName, "other")
+			}
+
+			resp, err := server.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			contentType := defaultFormat
+			if tc.status == http.StatusBadRequest {
+				contentType = "text/plain; charset=utf-8"
+			}
+
+			if resp.StatusCode != tc.status || string(body) != tc.body || resp.Header.Get(ContentType) != contentType {
+				t.Fatalf("got status=%d, type=%q, body=%q; want status=%d, type=%q, body=%q",
+					resp.StatusCode, resp.Header.Get(ContentType), body, tc.status, contentType, tc.body)
+			}
+		})
+	}
+}
+
 func TestRejectInvalidPathComponents(t *testing.T) {
 	server := newServer(testRoot(t, map[string]string{"5xx.html": "fallback"}))
 
@@ -253,17 +320,24 @@ func TestErrorRequestMetrics(t *testing.T) {
 	registry.MustRegister(requestCount, requestDuration)
 
 	for _, tc := range []struct {
-		name  string
-		files map[string]string
-	}{{"page found", map[string]string{"503.html": "page"}}, {"page missing", nil}} {
+		name, path string
+		files      map[string]string
+	}{
+		{name: "Nginx page found", path: "/", files: map[string]string{"503.html": "page"}},
+		{name: "Nginx page missing", path: "/"},
+		{name: "Traefik page found", path: "/503.html", files: map[string]string{"503.html": "page"}},
+		{name: "Traefik page missing", path: "/503.html"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requestCount.Reset()
 			requestDuration.Reset()
 
 			server := newServer(testRoot(t, tc.files))
+			req := errorRequest("503", "text/html")
+			req.URL.Path = tc.path
 
 			start := time.Now()
-			server.ServeHTTP(delayedResponseWriter{httptest.NewRecorder()}, errorRequest("503", "text/html"))
+			server.ServeHTTP(delayedResponseWriter{httptest.NewRecorder()}, req)
 			elapsed := time.Since(start).Seconds()
 
 			families, err := registry.Gather()

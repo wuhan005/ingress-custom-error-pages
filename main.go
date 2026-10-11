@@ -45,7 +45,7 @@ func main() {
 func newServer(root *os.Root) *flamego.Flame {
 	f := flamego.Classic()
 
-	f.Any("/", func(ctx flamego.Context) {
+	serveError := func(ctx flamego.Context) {
 		start := time.Now()
 		req := ctx.Request()
 		proto := strconv.Itoa(req.ProtoMajor) + "." + strconv.Itoa(req.ProtoMinor)
@@ -56,6 +56,17 @@ func newServer(root *os.Root) *flamego.Flame {
 
 		namespace := req.Header.Get(Namespace)
 		serviceName := req.Header.Get(ServiceName)
+		requested := req.Header.Get(FormatHeader)
+		errCode := req.Header.Get(CodeHeader)
+
+		if pathCode := ctx.Param("code"); pathCode != "" {
+			// Traefik forwards client headers, so its error-page URL defines the response.
+			query := req.URL.Query()
+			namespace = query.Get("namespace")
+			serviceName = query.Get("service")
+			requested = defaultFormat
+			errCode = pathCode
+		}
 
 		for _, name := range []string{namespace, serviceName} {
 			if name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
@@ -65,7 +76,7 @@ func newServer(root *os.Root) *flamego.Flame {
 		}
 
 		format, ext := defaultFormat, ".html"
-		if requested := req.Header.Get(FormatHeader); requested != "" && requested != defaultFormat {
+		if requested != "" && requested != defaultFormat {
 			if mediaType, _, err := mime.ParseMediaType(requested); err == nil && mediaType != defaultFormat {
 				if extensions, err := mime.ExtensionsByType(mediaType); err == nil && len(extensions) > 0 {
 					format, ext = mediaType, extensions[0]
@@ -73,7 +84,7 @@ func newServer(root *os.Root) *flamego.Flame {
 			}
 		}
 
-		code, err := strconv.Atoi(req.Header.Get(CodeHeader))
+		code, err := strconv.Atoi(errCode)
 		if err != nil || code < 400 || code > 599 {
 			code = http.StatusNotFound
 		}
@@ -102,7 +113,10 @@ func newServer(root *os.Root) *flamego.Flame {
 		if _, err := io.Copy(ctx.ResponseWriter(), file); err != nil {
 			log.Printf("unexpected error writing custom error response: %v", err)
 		}
-	})
+	}
+
+	f.Any("/", serveError)
+	f.Any("/{code}.html", serveError)
 
 	f.Any("/metrics", promhttp.Handler())
 	f.Any("/healthz", func() {})
