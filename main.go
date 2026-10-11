@@ -99,7 +99,11 @@ func main() {
 			http.NotFound(ctx.ResponseWriter(), ctx.Request().Request)
 			return
 		}
-		defer f.Close()
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Printf("unexpected error closing file: %v", err)
+			}
+		}()
 
 		log.Printf("serving custom error response for code %v and format %v", code, format)
 		_, _ = io.Copy(ctx.ResponseWriter(), f)

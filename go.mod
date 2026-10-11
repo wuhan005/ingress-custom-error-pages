@@ -1,6 +1,6 @@
 module github.com/wuhan005/ingress-custom-error-pages
 
-go 1.19
+go 1.27.0
 
 require (
 	github.com/flamego/flamego v1.7.0

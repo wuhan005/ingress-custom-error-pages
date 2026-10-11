@@ -63,7 +63,7 @@ spec:
     spec:
       containers:
         - name: nginx-error-server
-          image: registry.cn-hangzhou.aliyuncs.com/eggplant/ingress-custom-error-pages:latest
+          image: ghcr.io/wuhan005/ingress-custom-error-pages:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
