@@ -9,25 +9,21 @@ Customized error pages for Nginx Ingress and Traefik.
 1. Create file `custom-error.yaml` with the following contents:
 
 ```yaml
+
 ---
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: custom-error-pages
 data:
-  404: |
-    <!DOCTYPE html>
-    <html>
-      <head><title>PAGE NOT FOUND</title></head>
-      <body>PAGE NOT FOUND</body>
-    </html>
-  503: |
-    <!DOCTYPE html>
-    <html>
-      <head><title>CUSTOM SERVICE UNAVAILABLE</title></head>
-      <body>CUSTOM SERVICE UNAVAILABLE</body>
-    </html>
+  404.html: |
+    <!doctype html><html lang="en"><head><meta charset="utf-8"><title>PAGE NOT FOUND</title></head><body>PAGE NOT FOUND</body></html>
+  503.html: |
+    <!doctype html><html lang="en"><head><meta charset="utf-8"><title>CUSTOM SERVICE UNAVAILABLE</title></head><body>CUSTOM SERVICE UNAVAILABLE</body></html>
+
 ---
+
 apiVersion: v1
 kind: Service
 metadata:
@@ -43,7 +39,9 @@ spec:
     - port: 80
       targetPort: 8080
       name: http
+
 ---
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -91,18 +89,24 @@ spec:
           volumeMounts:
             - name: custom-error-pages
               mountPath: /www
+              readOnly: true
 
       # Mounting custom error page from configMap
       volumes:
         - name: custom-error-pages
           configMap:
             name: custom-error-pages
-            items:
-              - key: "404"
-                path: "404.html"
-              - key: "503"
-                path: "503.html"
 ```
+
+The ConfigMap keys are filenames: `404.html` is mounted as `/www/404.html`.
+Replace the sample HTML with your own page; HTML and inline CSS can be minified before adding them to the ConfigMap.
+The read-only mount covers the entire `/www` directory and hides the image's bundled pages.
+Add any required fallback pages, such as `4xx.html` or `5xx.html`, to the same ConfigMap.
+
+To update a page, edit the ConfigMap and reapply the manifest, or commit the change to your GitOps repository.
+Kubernetes propagates mounted ConfigMap updates with a delay; this server reads the updated files without a restart.
+Keep the directory mount without `subPath`, which does not receive these updates.
+See [mounted ConfigMap updates](https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/#mounted-configmaps-are-updated-automatically).
 
 Both probes request `/healthz` directly on the Pod's port `8080`, without going through the ingress controller.
 The readiness probe stops traffic to an unready Pod; the liveness probe restarts an unhealthy container.
@@ -117,32 +121,21 @@ See [Kubernetes probe configuration](https://kubernetes.io/docs/tasks/configure-
 
 ## Getting started with Traefik
 
-This setup applies custom error pages globally to the `web` and `websecure` entryPoints.
-Low-priority catch-all routes also handle requests that do not match an application router.
+This setup adds low-priority catch-all routes on the `web` and `websecure` entryPoints.
+They serve a custom 404 only when no application router matches the request's host and path.
+Responses from matched application services, including 404 and 5xx errors, are passed through unchanged.
 Individual application Ingress resources do not need middleware annotations.
 
 1. Deploy the ConfigMap, Service and Deployment from step 1 above with
    `kubectl apply -n default -f custom-error.yaml`. The examples below use namespace `default`
    and the error-page Service `nginx-errors`. Ensure Traefik's `Middleware` and `IngressRoute` CRDs
    are installed and its Kubernetes CRD provider watches this namespace.
+   For this fallback-only setup, the ConfigMap only needs `404.html`; you can omit `503.html`.
+   The page is served from the read-only `/www` mount, so changing its HTML does not require rebuilding the image.
 
 2. Save the following as `traefik-errors.yaml`, then run `kubectl apply -f traefik-errors.yaml`:
 
 ```yaml
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: custom-errors
-  namespace: default
-spec:
-  errors:
-    status:
-      - "400-599"
-    query: "/{status}.html"
-    service:
-      name: nginx-errors
-      port: 80
----
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -151,7 +144,9 @@ metadata:
 spec:
   replacePath:
     path: /404.html
+
 ---
+
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -169,7 +164,9 @@ spec:
       services:
         - name: nginx-errors
           port: 80
+
 ---
+
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -191,6 +188,7 @@ spec:
 ```
 
 The fallback routes use priority `1`; application routes must have a higher priority.
+An unmatched path can reach the fallback even when its host has other application routes.
 The `error-page-not-found` middleware rewrites unmatched paths to `/404.html`, including paths
 such as `/metrics` and `/healthz`, so the fallback does not expose the error server's management endpoints.
 
@@ -198,35 +196,24 @@ The HTTPS route uses Traefik's available certificate, falling back to its defaul
 Clients still need a certificate valid for the requested hostname; an HTTP error page cannot handle TLS handshake failures.
 If HTTP-to-HTTPS redirection is enabled, HTTP requests follow that redirect before reaching the HTTPS fallback.
 
-3. Merge these settings into your existing Traefik Helm values and upgrade the Traefik release:
+3. Ensure the Kubernetes CRD provider is enabled in your Traefik Helm values:
 
 ```yaml
 providers:
   kubernetesCRD:
     enabled: true
-
-additionalArguments:
-  - "--entryPoints.web.http.middlewares=default-custom-errors@kubernetescrd"
-  - "--entryPoints.websecure.http.middlewares=default-custom-errors@kubernetescrd"
 ```
 
-Preserve your existing Helm values and additional arguments. If an entryPoint already has middlewares,
-prepend `default-custom-errors@kubernetescrd` to its existing comma-separated middleware list
-instead of defining the same option twice. The prefix `default-` is the middleware's namespace;
-change it along with the resource namespaces if you deploy elsewhere.
+Preserve your existing Helm values and upgrade the Traefik release if you change this setting.
+Do not attach an Errors middleware to the entryPoints or application routers for this fallback-only setup.
+If you previously installed the global Errors configuration, remove its middleware references from the entryPoints
+and application routers first. Wait for the Traefik Helm rollout to complete before deleting the unused Errors middleware,
+so pods running the old configuration do not lose their middleware references during the transition.
 
-Traefik must restart with the updated entryPoint settings. The Errors middleware then handles 400–599
-responses from all routers on these entryPoints, including application middleware errors.
-Remove any per-Ingress references to the same Errors middleware to avoid applying it twice.
+The fallback requests `/404.html` from this server and uses `/www/404.html`, falling back to `/www/4xx.html`.
+The `/{code}.html` endpoint always serves HTML and takes the status from its URL, ignoring forwarded Nginx-specific headers.
 
-Traefik replaces `{status}` with the response status: a 503 requests `/503.html` from this server.
-This global configuration selects pages directly under `/www`, such as `/www/404.html`, `/www/503.html`
-or `/www/5xx.html`. The `/{code}.html` endpoint always serves HTML and takes the status from its URL,
-ignoring forwarded Nginx-specific headers.
-
-See Traefik's [Errors middleware](https://doc.traefik.io/traefik/reference/routing-configuration/http/middlewares/errorpages/),
-[entryPoint middlewares](https://doc.traefik.io/traefik/reference/install-configuration/entrypoints/#httpmiddlewares),
-[IngressRoute](https://doc.traefik.io/traefik/reference/routing-configuration/kubernetes/crd/http/ingressroute/)
+See Traefik's [IngressRoute](https://doc.traefik.io/traefik/reference/routing-configuration/kubernetes/crd/http/ingressroute/)
 and [ReplacePath middleware](https://doc.traefik.io/traefik/reference/routing-configuration/http/middlewares/replacepath/) documentation.
 
 ## Error page fallback

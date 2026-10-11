@@ -9,25 +9,21 @@
 1. 创建 `custom-error.yaml` 文件，内容如下：
 
 ```yaml
+
 ---
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: custom-error-pages
 data:
-  404: |
-    <!DOCTYPE html>
-    <html>
-      <head><title>PAGE NOT FOUND</title></head>
-      <body>PAGE NOT FOUND</body>
-    </html>
-  503: |
-    <!DOCTYPE html>
-    <html>
-      <head><title>CUSTOM SERVICE UNAVAILABLE</title></head>
-      <body>CUSTOM SERVICE UNAVAILABLE</body>
-    </html>
+  404.html: |
+    <!doctype html><html lang="en"><head><meta charset="utf-8"><title>PAGE NOT FOUND</title></head><body>PAGE NOT FOUND</body></html>
+  503.html: |
+    <!doctype html><html lang="en"><head><meta charset="utf-8"><title>CUSTOM SERVICE UNAVAILABLE</title></head><body>CUSTOM SERVICE UNAVAILABLE</body></html>
+
 ---
+
 apiVersion: v1
 kind: Service
 metadata:
@@ -43,7 +39,9 @@ spec:
     - port: 80
       targetPort: 8080
       name: http
+
 ---
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -91,18 +89,24 @@ spec:
           volumeMounts:
             - name: custom-error-pages
               mountPath: /www
+              readOnly: true
 
       # 挂载 ConfigMap 中的自定义错误页面
       volumes:
         - name: custom-error-pages
           configMap:
             name: custom-error-pages
-            items:
-              - key: "404"
-                path: "404.html"
-              - key: "503"
-                path: "503.html"
 ```
+
+ConfigMap 的键名就是文件名，例如 `404.html` 会挂载为 `/www/404.html`。
+请将示例 HTML 替换为自己的页面，HTML 和内联 CSS 可以压缩后再放入 ConfigMap。
+只读挂载会覆盖整个 `/www` 目录，镜像内置的页面将不可见。
+如需 `4xx.html`、`5xx.html` 等回退页面，也应将它们放入同一个 ConfigMap。
+
+更新页面时，修改 ConfigMap 并重新应用清单，或将修改提交到 GitOps 仓库。
+Kubernetes 会在一段延迟后同步挂载内容，本服务无需重启即可读取更新后的文件。
+请保持目录挂载，不要使用 `subPath`，后者无法接收这些更新。
+具体行为可参考 [ConfigMap 挂载更新文档](https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/#mounted-configmaps-are-updated-automatically)。
 
 两个探针都直接请求 Pod 的 `8080` 端口上的 `/healthz`，不经过入口控制器。
 就绪检查（readinessProbe）失败时停止向该 Pod 分发流量，存活检查（livenessProbe）失败时重启容器。
@@ -116,31 +120,21 @@ spec:
 
 ## Traefik 快速开始
 
-以下配置在 `web` 和 `websecure` 入口（entryPoints）上全局启用自定义错误页面，
-并通过低优先级兜底路由处理未匹配到应用路由的请求。无需为每个应用的 Ingress 单独添加中间件注解。
+以下配置在 `web` 和 `websecure` 入口（entryPoints）上添加低优先级兜底路由，
+仅在请求的 Host 和路径未匹配到应用路由时返回自定义 404。
+已匹配应用服务的响应会原样返回，包括服务自身产生的 404 和 5xx 错误。
+无需为每个应用的 Ingress 单独添加中间件注解。
 
 1. 使用上方第 1 步的 ConfigMap、Service 和 Deployment，执行
    `kubectl apply -n default -f custom-error.yaml` 部署错误页面服务。
    以下示例使用 `default` 命名空间，错误页面 Service 名为 `nginx-errors`。
    请确保已安装 Traefik 的 `Middleware` 和 `IngressRoute` CRD，且 Kubernetes CRD 提供程序监听该命名空间。
+   这套仅处理兜底请求的配置只需在 ConfigMap 中保留 `404.html`，可以省略 `503.html`。
+   页面从只读挂载的 `/www` 目录读取，修改 HTML 无需重新构建镜像。
 
 2. 将以下内容保存为 `traefik-errors.yaml`，然后执行 `kubectl apply -f traefik-errors.yaml`：
 
 ```yaml
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: custom-errors
-  namespace: default
-spec:
-  errors:
-    status:
-      - "400-599"
-    query: "/{status}.html"
-    service:
-      name: nginx-errors
-      port: 80
----
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -149,7 +143,9 @@ metadata:
 spec:
   replacePath:
     path: /404.html
+
 ---
+
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -167,7 +163,9 @@ spec:
       services:
         - name: nginx-errors
           port: 80
+
 ---
+
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -189,6 +187,7 @@ spec:
 ```
 
 兜底路由的优先级为 `1`，应用路由的优先级应高于该值。
+即使 Host 已配置了其他应用路由，没有匹配路由的路径也可能进入兜底。
 `error-page-not-found` 中间件将未匹配的请求路径重写为 `/404.html`，包括 `/metrics` 和 `/healthz` 等路径，
 避免通过兜底路由暴露错误页面服务的管理接口。
 
@@ -196,32 +195,24 @@ HTTPS 路由使用 Traefik 中可用的证书，没有匹配证书时使用默�
 客户端仍需能够验证请求域名的证书；HTTP 错误页面无法处理 TLS 握手失败。
 如果已启用 HTTP 到 HTTPS 的重定向，HTTP 请求会先重定向，再由 HTTPS 兜底路由处理。
 
-3. 将以下配置合并到现有的 Traefik Helm values 中，然后升级 Traefik release：
+3. 确保 Traefik Helm values 中已启用 Kubernetes CRD 提供程序：
 
 ```yaml
 providers:
   kubernetesCRD:
     enabled: true
-
-additionalArguments:
-  - "--entryPoints.web.http.middlewares=default-custom-errors@kubernetescrd"
-  - "--entryPoints.websecure.http.middlewares=default-custom-errors@kubernetescrd"
 ```
 
-合并时保留原有的 Helm values 和启动参数。如果某个入口已配置中间件，
-将 `default-custom-errors@kubernetescrd` 放在现有中间件列表的最前面，使用逗号分隔，避免重复定义同一个参数。
-其中 `default-` 前缀表示中间件所在的命名空间；如果部署到其他命名空间，需要同时修改资源中的命名空间和该前缀。
+修改该配置时，请保留原有的 Helm values 并升级 Traefik release。
+这套仅处理兜底请求的配置不需要在入口或应用路由上挂载 Errors 中间件。
+如果之前已安装全局 Errors 配置，请先移除入口和应用路由上的相关中间件引用，
+等待 Traefik 的 Helm 滚动更新完成后，再删除不再使用的 Errors 中间件，
+避免仍使用旧配置的 Pod 在更新期间因引用失效而无法处理请求。
 
-Traefik 需要重启以加载更新后的入口配置。之后，Errors 中间件会处理这些入口上所有路由返回的 400–599 响应，
-包括应用中间件产生的错误响应。如果之前已在单个 Ingress 上引用同一个 Errors 中间件，请移除该引用，避免重复应用。
-
-Traefik 会将 `{status}` 替换为实际响应状态码，例如 503 响应会向本服务请求 `/503.html`。
-这套全局配置直接使用 `/www` 下的页面，例如 `/www/404.html`、`/www/503.html` 或 `/www/5xx.html`。
+兜底路由向本服务请求 `/404.html`，使用 `/www/404.html`，不存在时回退到 `/www/4xx.html`。
 `/{code}.html` 接口始终返回 HTML，并使用 URL 中的状态码，忽略转发过来的 Nginx 专用请求头。
 
 相关配置可参考 Traefik 官方文档：
-[Errors 中间件](https://doc.traefik.io/traefik/reference/routing-configuration/http/middlewares/errorpages/)、
-[入口中间件](https://doc.traefik.io/traefik/reference/install-configuration/entrypoints/#httpmiddlewares)、
 [IngressRoute](https://doc.traefik.io/traefik/reference/routing-configuration/kubernetes/crd/http/ingressroute/)
 和 [ReplacePath 中间件](https://doc.traefik.io/traefik/reference/routing-configuration/http/middlewares/replacepath/)。
 
