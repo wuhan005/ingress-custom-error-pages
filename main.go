@@ -1,11 +1,11 @@
-// Copyright 2022 E99p1ant. All rights reserved.
+// Copyright 2026 E99p1ant. All rights reserved..
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
 package main
 
 import (
-	"fmt"
+	"errors"
 	"io"
 	"log"
 	"mime"
@@ -31,107 +31,130 @@ func init() {
 }
 
 func main() {
-	f := flamego.Classic()
 	flamego.SetEnv(flamego.EnvTypeProd)
+
+	root, err := os.OpenRoot("/www")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	newServer(root).Run(8080)
+}
+
+func newServer(root *os.Root) *flamego.Flame {
+	f := flamego.Classic()
 
 	f.Any("/", func(ctx flamego.Context) {
 		start := time.Now()
+		req := ctx.Request()
+		proto := strconv.Itoa(req.ProtoMajor) + "." + strconv.Itoa(req.ProtoMinor)
+		defer func() {
+			requestCount.WithLabelValues(proto).Inc()
+			requestDuration.WithLabelValues(proto).Observe(time.Since(start).Seconds())
+		}()
 
-		namespace := ctx.Request().Header.Get(Namespace)
-		serviceName := ctx.Request().Header.Get(ServiceName)
+		namespace := req.Header.Get(Namespace)
+		serviceName := req.Header.Get(ServiceName)
 
-		defaultExts, err := mime.ExtensionsByType(defaultFormat)
-		if err != nil || len(defaultExts) == 0 {
-			panic("couldn't get file extension for default format")
+		for _, name := range []string{namespace, serviceName} {
+			if name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+				http.Error(ctx.ResponseWriter(), "invalid namespace or service name", http.StatusBadRequest)
+				return
+			}
 		}
-		defaultExt := defaultExts[0]
-		ext := defaultExt
 
-		format := ctx.Request().Header.Get(FormatHeader)
-		if format == "" {
-			format = defaultFormat
-			log.Printf("format not specified. Using %v", format)
+		format, ext := defaultFormat, ".html"
+		if requested := req.Header.Get(FormatHeader); requested != "" && requested != defaultFormat {
+			if mediaType, _, err := mime.ParseMediaType(requested); err == nil && mediaType != defaultFormat {
+				if extensions, err := mime.ExtensionsByType(mediaType); err == nil && len(extensions) > 0 {
+					format, ext = mediaType, extensions[0]
+				}
+			}
 		}
 
-		cext, err := mime.ExtensionsByType(format)
-		if err != nil {
-			log.Printf("unexpected error reading media type extension: %v. Using %v", err, ext)
-			format = defaultFormat
-		} else if len(cext) == 0 {
-			log.Printf("couldn't get media type extension. Using %v", ext)
-		} else {
-			ext = cext[0]
-		}
-		ctx.ResponseWriter().Header().Set(ContentType, format)
-
-		errCode := ctx.Request().Header.Get(CodeHeader)
-		code, err := strconv.Atoi(errCode)
-		if err != nil {
+		code, err := strconv.Atoi(req.Header.Get(CodeHeader))
+		if err != nil || code < 400 || code > 599 {
 			code = http.StatusNotFound
-			log.Printf("unexpected error reading return code: %v. Using %v", err, code)
-		}
-		ctx.ResponseWriter().WriteHeader(code)
-
-		if !strings.HasPrefix(ext, ".") {
-			ext = "." + ext
 		}
 
-		// special case for compatibility
-		if ext == ".htm" {
-			ext = ".html"
+		file, err := tryToOpenFile(root, errorPagePaths(namespace, serviceName, code, ext))
+		if err != nil && format != defaultFormat {
+			format = defaultFormat
+			file, err = tryToOpenFile(root, errorPagePaths(namespace, serviceName, code, ".html"))
 		}
 
-		path := "/www"
-		statusCode := strconv.Itoa(code)
-
-		files := []string{
-			filepath.Join(path, namespace, serviceName, fmt.Sprintf("%v%v", code, ext)),
-			filepath.Join(path, namespace, serviceName, fmt.Sprintf("%cxx%v", statusCode[0], ext)),
-			filepath.Join(path, namespace, fmt.Sprintf("%v%v", code, ext)),
-			filepath.Join(path, namespace, fmt.Sprintf("%cxx%v", statusCode[0], ext)),
-			filepath.Join(path, fmt.Sprintf("%v%v", code, ext)),
-			filepath.Join(path, fmt.Sprintf("%cxx%v", statusCode[0], ext)),
-		}
-
-		f, err := tryToOpenFile(files)
 		if err != nil {
-			log.Printf("unexpected error opening file: %v", err)
-			http.NotFound(ctx.ResponseWriter(), ctx.Request().Request)
+			log.Printf("couldn't find custom error page for code %d: %v", code, err)
+			http.Error(ctx.ResponseWriter(), http.StatusText(code), code)
 			return
 		}
+
 		defer func() {
-			if err := f.Close(); err != nil {
+			if err := file.Close(); err != nil {
 				log.Printf("unexpected error closing file: %v", err)
 			}
 		}()
 
-		log.Printf("serving custom error response for code %v and format %v", code, format)
-		_, _ = io.Copy(ctx.ResponseWriter(), f)
+		ctx.ResponseWriter().Header().Set(ContentType, format)
+		ctx.ResponseWriter().WriteHeader(code)
 
-		duration := time.Since(start).Seconds()
-
-		proto := strconv.Itoa(ctx.Request().ProtoMajor)
-		proto = fmt.Sprintf("%s.%s", proto, strconv.Itoa(ctx.Request().ProtoMinor))
-
-		requestCount.WithLabelValues(proto).Inc()
-		requestDuration.WithLabelValues(proto).Observe(duration)
+		if _, err := io.Copy(ctx.ResponseWriter(), file); err != nil {
+			log.Printf("unexpected error writing custom error response: %v", err)
+		}
 	})
 
 	f.Any("/metrics", promhttp.Handler())
 	f.Any("/healthz", func() {})
 
-	f.Run(8080)
+	return f
 }
 
-func tryToOpenFile(paths []string) (*os.File, error) {
-	for _, path := range paths {
-		f, err := os.Open(path)
-		if err != nil {
-			log.Printf("unexpected error opening file: %v", err)
-			continue
-		}
-		return f, nil
+func errorPagePaths(namespace, serviceName string, code int, ext string) []string {
+	dirs := make([]string, 0, 3)
+	if serviceName != "" {
+		dirs = append(dirs, filepath.Join(namespace, serviceName))
+	}
+	if namespace != "" {
+		dirs = append(dirs, namespace)
+	}
+	dirs = append(dirs, "")
+
+	statusCode := strconv.Itoa(code)
+	paths := make([]string, 0, 2*len(dirs))
+	for _, dir := range dirs {
+		paths = append(paths, filepath.Join(dir, statusCode+ext), filepath.Join(dir, statusCode[:1]+"xx"+ext))
 	}
 
-	return nil, os.ErrNotExist
+	return paths
+}
+
+func tryToOpenFile(root *os.Root, paths []string) (*os.File, error) {
+	lastErr := os.ErrNotExist
+	for _, path := range paths {
+		f, err := root.Open(path)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				log.Printf("unexpected error opening file: %v", err)
+				lastErr = err
+			}
+			continue
+		}
+
+		info, err := f.Stat()
+		if err == nil && info.Mode().IsRegular() {
+			return f, nil
+		}
+
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("unexpected error closing file: %v", closeErr)
+		}
+
+		if err != nil {
+			log.Printf("unexpected error checking file: %v", err)
+			lastErr = err
+		}
+	}
+
+	return nil, lastErr
 }

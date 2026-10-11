@@ -92,6 +92,24 @@ spec:
 
 4. Edit the `ingress-nginx-controller` ConfigMap and create the key `custom-http-errors` with a value of `404,503`.
 
+## Error page fallback
+
+Pages are searched in service, namespace, then global directories under `/www`.
+Within each directory, the exact status code (such as `503.html`) takes precedence over the status class (`5xx.html`).
+Missing files and directories are skipped. Namespace and service headers must be single path components;
+invalid components return HTTP 400, and files cannot be read through symlinks pointing outside `/www`.
+
+HTML always uses the `.html` extension. Unknown formats and missing pages for a requested format fall back to HTML.
+If no page exists, the server returns plain text with the original error status.
+Missing, malformed, or out-of-range `X-Code` values fall back to 404; supported error codes are 400–599.
+
+## Metrics
+
+`/metrics` exposes request counts and durations for error-page requests, including requests that fail to find a page.
+Durations use seconds: `default_http_backend_http_request_duration_seconds`.
+Update dashboards and alerts that use the former `default_http_backend_http_request_duration_milliseconds`
+metric to use the new name; the old implementation already recorded values in seconds.
+
 ## Why not [ingress-nginx official custom error pages](https://github.com/kubernetes/ingress-nginx/tree/main/images/custom-error-pages)?
 
 The official custom error pages only provides a simple HTTP server to serve the static error page files, which doesn't
